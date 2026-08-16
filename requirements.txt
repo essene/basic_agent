@@ -3,3 +3,4 @@ langchain
 langchain-huggingface
 langchain-tavily
 langgraph
+python-dotenv
