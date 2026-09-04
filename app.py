@@ -1,6 +1,9 @@
 import streamlit as st
 
-from agent_book import graph
+try:
+    from agent_book import graph
+except ImportError:
+    from basic_agent.agent_book import graph
 
 
 st.title("Pesquisa de livros de escalada!")
@@ -11,40 +14,24 @@ st.write(
 
 
 with st.form("book_form"):
-
-    question = st.text_area(
-        "Qual livro de escalada você busca?"
-    )
-
-    submitted = st.form_submit_button(
-        "Search"
-    )
+    question = st.text_area("Qual livro de escalada você busca?")
+    submitted = st.form_submit_button("Search")
 
 
 if submitted:
-
     if not question.strip():
-
-        st.warning(
-            "Digite uma pergunta:"
-        )
-
+        st.warning("Digite uma pergunta:")
     else:
+        with st.spinner("Procurando na web..."):
+            try:
+                result = graph.invoke({
+                    "question": question,
+                    "answer": "",
+                    "messages": [],
+                })
+            except Exception as exc:
+                st.error(f"Erro ao executar o agente: {exc}")
+                st.stop()
 
-        with st.spinner(
-            "Procurando na web..."
-        ):
-
-            result = graph.invoke({
-                "question": question,
-                "search_results": [],
-                "answer": ""
-            })
-
-        st.subheader(
-            "Recomendações!"
-        )
-
-        st.markdown(
-            result["answer"]
-        )
+        st.subheader("Recomendações!")
+        st.markdown(result["answer"])

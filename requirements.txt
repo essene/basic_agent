@@ -4,3 +4,4 @@ langchain-huggingface
 langchain-tavily
 langgraph
 python-dotenv
+langgraph-cli[inmem]

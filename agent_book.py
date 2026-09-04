@@ -1,51 +1,85 @@
 ﻿import os
-from typing import TypedDict
+from typing import Annotated, TypedDict
 
 from dotenv import load_dotenv
+from langchain.tools import tool
+from langchain_core.messages import HumanMessage
 from langchain_huggingface import (
     ChatHuggingFace,
     HuggingFaceEndpoint,
 )
 from langchain_tavily import TavilySearch
 from langgraph.graph import END, START, StateGraph
+from langgraph.graph.message import add_messages
+from langgraph.prebuilt import ToolNode
+from langgraph.prebuilt import tools_condition
+
+load_dotenv()
 
 
 # ============================================================
 # API KEYS
 # ============================================================
 
-load_dotenv()
-
-
 HF_TOKEN = os.environ.get("HF_TOKEN")
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY")
-
-
-# ============================================================
-# LLM — HUGGING FACE
-# ============================================================
-
-llm = HuggingFaceEndpoint(
-    repo_id="openai/gpt-oss-120b",
-    task="text-generation",
-    max_new_tokens=700,
-    huggingfacehub_api_token=HF_TOKEN,
-)
-
-chat_model = ChatHuggingFace(
-    llm=llm
-)
 
 
 # ============================================================
 # TAVILY — procura livros na web
 # ============================================================
 
-web_search = TavilySearch(
-    max_results=5,
-    topic="general",
-    tavily_api_key=TAVILY_API_KEY,
+tavily_client = (
+    TavilySearch(
+        max_results=5,
+        topic="general",
+        tavily_api_key=TAVILY_API_KEY,
+    )
 )
+
+
+# ============================================================
+#  Procura do livro na web
+# ============================================================
+@tool
+def web_search(query:str) -> str:
+    """Busque na web somente por livros de escalada! Caso não encontre, diga que não encontrou.
+        Se o usuário pedir sobre outros temas , retorne que o agente é especializado em
+        livros de escalada e não pode ajudar com outros temas.
+    """
+    try:
+        results = tavily_client.invoke({"query": query})
+    except Exception as exc:
+        return f"Erro ao consultar a web: {exc}"
+
+    items = results.get("results", [])
+
+    if not items:
+        return f"No results found for '{query}'"
+
+    resposta = []
+    for item in items:
+        resposta.append(
+            f"Title: {item.get('title')}\n"
+            f"URL: {item.get('url')}\n"
+            f"Description: {item.get('content','')[:400]}"
+        )
+    return "\n\n".join(resposta)
+# ============================================================
+# LLM - Hugging face
+# ============================================================
+
+llm = (
+    HuggingFaceEndpoint(
+        repo_id="openai/gpt-oss-120b",
+        task="text-generation",
+        max_new_tokens=700,
+        huggingfacehub_api_token=HF_TOKEN,
+    )
+)
+
+chat_model = ChatHuggingFace(llm=llm)
+llm_with_tools = chat_model.bind_tools([web_search])
 
 
 # ============================================================
@@ -54,116 +88,45 @@ web_search = TavilySearch(
 
 class State(TypedDict):
     question: str
-    search_results: list
     answer: str
+    messages: Annotated[list, add_messages]
 
+def agent_node(state: State):
+    prompt = f"Pergunta do usuário: {state['question']}"
 
-# ============================================================
-#  Procura do livro na web
-# ============================================================
-
-def search_web(state: State):
-    results = web_search.invoke({'query': state['question']})
-    return {'search_results': results.get('results', [])}
-
-
-# ============================================================
-# Resposta
-# ============================================================
-
-def generate_answer(state: State):
-
-    results = state["search_results"]
-
-    if not results:
-
+    if llm_with_tools is None:
         return {
-            "answer": (
-                "Não encontrei resultados na web para essa pesquisa."
-            )
+            "answer": "O agente não está configurado corretamente. Verifique as chaves da API do Hugging Face e Tavily.",
+            "messages": [],
         }
 
-    context = "\n\n".join([f"""TITLE: {result.get("title", "")}URL: {result.get("url", "")}
-CONTENT: {result.get("content", "")}
-"""
-            for result in results
-        ]
-    )
+    messages = state.get("messages", [])
+    if not messages:
+        messages = [HumanMessage(content=prompt)]
 
-    prompt = f"""
-            Você é um agente especializado em pesquisar
-            livros de escalada na internet.
+    try:
+        response = llm_with_tools.invoke(messages)
+    except Exception as exc:
+        return {
+            "answer": f"Não foi possível executar o agente neste ambiente: {exc}",
+            "messages": [],
+        }
 
-            Pergunta do usuário:
-
-            {state["question"]}
-
-            Resultados encontrados na internet:
-
-            {context}
-
-            Sua tarefa:
-
-            1. Identifique quais resultados realmente
-            mencionam livros de escalada.
-
-            2. Para cada livro informe em formato de tópico:
-            - título
-            - autor, se disponível
-            - resumo do conteudo em uma linha
-            - fonte/URL
-
-            3. Se o resultado não for um livro, não traga.
-
-            4. Se não houver livros relevantes, responda que não encontrou livros de escalada.
-            5.Não invente resultados, se não encontrar traga como missing.
-
-            Responda em português.
-            """
-
-    response = chat_model.invoke(prompt)
-
-    return {
-        "answer": response.content
-    }
-
+    return {"answer": response.content, "messages": [response]}
 
 # ============================================================
 # LANGGRAPH
 # ============================================================
 
+
 graph_builder = StateGraph(State)
-
-
-graph_builder.add_node(
-    "search_web",
-    search_web
+graph_builder.add_node("agent", agent_node)
+graph_builder.add_node("tools", ToolNode([web_search]))
+graph_builder.add_edge(START, "agent")
+graph_builder.add_conditional_edges(
+    "agent",
+    tools_condition,
 )
-
-graph_builder.add_node(
-    "generate_answer",
-    generate_answer
-)
-
-
-# ============================================================
-# EDGES
-# ============================================================
-
-graph_builder.add_edge(
-    START,
-    "search_web"
-)
-
-graph_builder.add_edge(
-    "search_web",
-    "generate_answer"
-)
-
-graph_builder.add_edge(
-    "generate_answer",
-    END
-)
-
+graph_builder.add_edge("tools", "agent")
 
 graph = graph_builder.compile()
